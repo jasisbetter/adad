@@ -3,25 +3,16 @@
 -- server's answer is the real one. Randomness is passed in as `rng` so tests can seed it.
 
 local Config = require(script.Parent.Config)
+local Types = require(script.Parent.Types)
 
 local Logic = {}
 
-export type Item = {
-	id: string,
-	kind: string,
-	type: string,
-	rarity: string,
-	level: number,
-}
-
-export type WaveSpec = {
-	count: number, -- monsters in the wave
-	hpMult: number,
-	dmgMult: number,
-	coinMult: number,
-}
+export type Item = Types.Item
+export type WaveSpec = Types.WaveSpec
 
 type Rng = Random
+type Area = Types.Area
+type MonsterDef = Types.MonsterDef
 
 -- Picks one id from { { id, weight }, ... }.
 function Logic.weightedPick(list: { { any } }, rng: Rng): string
@@ -167,19 +158,49 @@ function Logic.randomHalf(count: number, rng: Rng): { [number]: boolean }
 	return kept
 end
 
+-- Which chest a cleared wave gives: a boss chest after a boss wave, a big chest every 5th wave.
+function Logic.chestKind(wave: number, boss: boolean): "normal" | "big" | "boss"
+	if boss then
+		return "boss"
+	elseif wave % Config.Gear.bigChestEvery == 0 then
+		return "big"
+	end
+	return "normal"
+end
+
 -- Rolls the gear for a chest after `wave`. Normal chest: 1 item with the next key rarity's odds.
--- Every 5th wave: a big chest with 3 items, the best at least Epic.
-function Logic.rollChest(wave: number, keyRarity: string, kindId: string, rng: Rng): { Item }
+-- Big chest (every 5th wave): 3 items, the best at least Epic. Boss chest: 3 items, the best at
+-- least Legendary, and a Legendary key's boss chest can make the best one Mythic.
+-- opts.first: the tutorial's first chest (Config.Gear.firstChest). Odds improve every 5 waves.
+function Logic.rollChest(
+	wave: number,
+	keyRarity: string,
+	kindId: string,
+	rng: Rng,
+	opts: { boss: boolean?, first: boolean? }?
+): { Item }
 	local G = Config.Gear
+	if opts and opts.first then
+		return { Logic.newItem(kindId, G.firstChest.type, G.firstChest.rarity) }
+	end
 	local kr = Config.KeyRarities[keyRarity] or Config.KeyRarities.Common
 	local steps = math.floor((wave - 1) / G.chestOddsStepEvery)
 	local odds = Logic.boostedOdds(Config.GearOdds[kr.chestOdds], steps, G.chestOddsStep)
-	local big = wave % G.bigChestEvery == 0
-	local count = if big then G.bigChestCount else 1
+	local kind = Logic.chestKind(wave, opts ~= nil and opts.boss == true)
+	local count, minBest = 1, nil
+	if kind == "boss" then
+		count, minBest = G.bossChestCount, G.bossChestMin
+	elseif kind == "big" then
+		count, minBest = G.bigChestCount, G.bigChestMin
+	end
 	local items = {}
 	for i = 1, count do
-		local minRarity = if big and i == 1 then G.bigChestMin else nil
-		table.insert(items, Logic.newItem(kindId, Logic.rollGearType(kindId, rng), Logic.rollRarity(odds, rng, minRarity)))
+		local minRarity = if i == 1 then minBest else nil
+		local rarity = Logic.rollRarity(odds, rng, minRarity)
+		if i == 1 and kind == "boss" and kr.mythicBossChest > 0 and rng:NextNumber() < kr.mythicBossChest then
+			rarity = "Mythic"
+		end
+		table.insert(items, Logic.newItem(kindId, Logic.rollGearType(kindId, rng), rarity))
 	end
 	table.sort(items, function(a, b)
 		return Logic.rarityOrder(a.rarity) > Logic.rarityOrder(b.rarity)
@@ -216,4 +237,357 @@ function Logic.sortBest(items: { Item })
 	end)
 end
 
+---------------------------------------------------------------------------
+-- Gear: levels, costs, merge, sell, powers
+---------------------------------------------------------------------------
+
+-- The main stat an item would have at `level`.
+function Logic.statAt(item: Item, level: number): number
+	return Logic.itemStat({ id = item.id, kind = item.kind, type = item.type, rarity = item.rarity, level = level })
+end
+
+function Logic.maxLevel(rarity: string): number
+	local r = Config.RarityById[rarity]
+	return if r then r.maxLevel else 1
+end
+
+-- Coins to go from item.level to item.level + 1; nil at max level.
+function Logic.upgradeCost(item: Item): number?
+	local r = Config.RarityById[item.rarity]
+	local kind = Config.KeyKinds[item.kind]
+	if not r or not kind or item.level >= r.maxLevel then
+		return nil
+	end
+	return math.floor(r.upgradeBase * Config.UpgradeGrowth ^ item.level * kind.coinMult + 0.5)
+end
+
+function Logic.sellValue(item: Item): number
+	local r = Config.RarityById[item.rarity]
+	local kind = Config.KeyKinds[item.kind]
+	if not r or not kind then
+		return 0
+	end
+	return r.sell * kind.coinMult
+end
+
+function Logic.nextRarity(rarity: string): string?
+	local r = Config.RarityById[rarity]
+	local nextRow = r and Config.Rarities[r.order + 1]
+	return if nextRow then nextRow.id else nil
+end
+
+-- Merge identity and index key: "Ash|Sword|Rare".
+function Logic.itemKey(item: Item): string
+	return `{item.kind}|{item.type}|{item.rarity}`
+end
+
+-- The 3 items a merge uses: `pick` plus the 2 lowest-level identical items that are not equipped.
+-- nil when there aren't 3, or the rarity can't merge (Mythic).
+function Logic.mergeGroup(items: { Item }, pick: Item, equipped: { [string]: string }): { string }?
+	if not Logic.nextRarity(pick.rarity) then
+		return nil
+	end
+	local equippedIds = {}
+	for _, id in equipped do
+		equippedIds[id] = true
+	end
+	local key = Logic.itemKey(pick)
+	local others = {}
+	for _, item in items do
+		if item.id ~= pick.id and not equippedIds[item.id] and Logic.itemKey(item) == key then
+			table.insert(others, item)
+		end
+	end
+	if #others < 2 then
+		return nil
+	end
+	table.sort(others, function(a, b)
+		if a.level ~= b.level then
+			return a.level < b.level
+		end
+		return a.id < b.id
+	end)
+	return { pick.id, others[1].id, others[2].id }
+end
+
+-- A weapon's power row with its kind, e.g. { kind = "burn", dps = 0.2, duration = 3 }.
+-- nil for Common items and armor.
+function Logic.power(item: Item): { [string]: any }?
+	if Logic.itemSlot(item) ~= "Weapon" then
+		return nil
+	end
+	local def = Config.Powers[item.kind]
+	local row = def and def.byRarity[item.rarity]
+	if not def or not row then
+		return nil
+	end
+	local out: { [string]: any } = { kind = def.kind }
+	for k, v in row do
+		out[k] = v
+	end
+	return out
+end
+
+function Logic.maxHp(armor: Item?): number
+	local extra = if armor and Logic.itemSlot(armor) == "Armor" then Logic.itemStat(armor) else 0
+	return Config.Combat.playerBaseHp + extra
+end
+
+function Logic.weaponDamage(weapon: Item?): number
+	if weapon and Logic.itemSlot(weapon) == "Weapon" then
+		return Logic.itemStat(weapon)
+	end
+	return Config.Combat.fistDamage
+end
+
+---------------------------------------------------------------------------
+-- Portal levels, kinds and keys
+---------------------------------------------------------------------------
+
+-- Coins to go from `level` to `level + 1`; nil at max.
+function Logic.portalCost(level: number): number?
+	local P = Config.Portal
+	if level >= P.maxLevel or level < 1 then
+		return nil
+	end
+	return math.floor(P.baseCost * P.costGrowth ^ (level - 1) + 0.5)
+end
+
+-- Coins and gear drop chance multiplier from openings.
+function Logic.portalBonus(level: number): number
+	return 1 + Config.Portal.bonusPerLevel * (math.max(level, 1) - 1)
+end
+
+function Logic.portalTier(level: number): number
+	local tier = 1
+	for i, startLevel in Config.Portal.tiers do
+		if level >= startLevel then
+			tier = i
+		end
+	end
+	return tier
+end
+
+function Logic.unlockedKinds(level: number): { string }
+	local list = {}
+	for _, kindId in Config.KindOrder do
+		if Config.KeyKinds[kindId].unlockLevel <= level then
+			table.insert(list, kindId)
+		end
+	end
+	return list
+end
+
+function Logic.bestKind(level: number): string
+	local list = Logic.unlockedKinds(level)
+	return list[#list] or Config.KindOrder[1]
+end
+
+-- Key shop price; nil for Legendary (never sold) or unknown ids.
+function Logic.keyPrice(kind: string, rarity: string): number?
+	local row = Config.KeyKinds[kind]
+	return if row then row.shop[rarity] else nil
+end
+
+function Logic.mapKeyOdds(band: string, area: Area, lucky: boolean): { { any } }
+	local b = if band == "outer" then area.outer else area.inner
+	local name = if lucky then b.odds .. "Lucky" else b.odds
+	return Config.MapKeyOdds[name] or Config.MapKeyOdds[b.odds]
+end
+
+-- A map monster's key drop: nil = no key, else the key rarity.
+function Logic.rollMapKey(band: string, area: Area, lucky: boolean, rng: Rng): string?
+	local b = if band == "outer" then area.outer else area.inner
+	if rng:NextNumber() >= b.keyChance then
+		return nil
+	end
+	if Config.GreyTest then
+		return "Common"
+	end
+	return Logic.weightedPick(Logic.mapKeyOdds(band, area, lucky), rng)
+end
+
+-- Exact percentages for the screen (2 decimals at most) that always sum to exactly 100:
+-- rounding error goes onto the largest entry. Work in hundredths so the sum is exact.
+function Logic.oddsPercent(odds: { { any } }): { Types.OddsPercent }
+	local total = 0
+	for _, row in odds do
+		total += row[2] :: number
+	end
+	local out = {}
+	if total <= 0 then
+		return out
+	end
+	local hundredths = {}
+	local sum, largest = 0, 1
+	for i, row in odds do
+		local h = math.floor((row[2] :: number) / total * 10000 + 0.5)
+		hundredths[i] = h
+		sum += h
+		if h > hundredths[largest] then
+			largest = i
+		end
+	end
+	hundredths[largest] += 10000 - sum
+	for i, row in odds do
+		table.insert(out, { id = row[1] :: string, percent = hundredths[i] / 100 })
+	end
+	return out
+end
+
+---------------------------------------------------------------------------
+-- Openings: bosses, coins, falls
+---------------------------------------------------------------------------
+
+function Logic.isBossWave(wave: number, keyRarity: string, rng: Rng): boolean
+	local kr = Config.KeyRarities[keyRarity]
+	if not kr or kr.bossEvery <= 0 or wave % kr.bossEvery ~= 0 then
+		return false
+	end
+	return rng:NextNumber() < kr.bossChance
+end
+
+-- Whole coins for one kill (>= 1). spec.coinMult already holds wave, key and kind; `coinMult` is the
+-- player's own multiplier (2 with the 2x Coins pass).
+function Logic.killCoins(def: MonsterDef, spec: WaveSpec, portalLevel: number, coinMult: number): number
+	return math.max(1, math.floor(def.coins * spec.coinMult * Logic.portalBonus(portalLevel) * coinMult + 0.5))
+end
+
+-- What a fall lost, measured in Ash coins: (coins + sell values) / kind coinMult.
+function Logic.lossValue(coins: number, items: { Item }, kindId: string): number
+	local total = coins
+	for _, item in items do
+		total += Logic.sellValue(item)
+	end
+	local kind = Config.KeyKinds[kindId]
+	return total / (if kind then kind.coinMult else 1)
+end
+
+function Logic.recoverTier(value: number): "small" | "medium" | "big"
+	local T = Config.Recover.thresholds
+	if value >= T.big then
+		return "big"
+	elseif value >= T.medium then
+		return "medium"
+	end
+	return "small"
+end
+
+function Logic.riftHpMult(players: number): number
+	return 1 + Config.Rift.hpPerExtra * (math.max(players, 1) - 1)
+end
+
+-- Combat music step: waves 1-4 -> 1, 5-9 -> 2, 10-14 -> 3, 15+ -> 4.
+function Logic.musicTier(wave: number): number
+	return math.clamp(math.floor(wave / Config.Music.tierEvery) + 1, 1, #Config.Music.Combat)
+end
+
+---------------------------------------------------------------------------
+-- Areas by position (rings around the centre)
+---------------------------------------------------------------------------
+
+-- The area and band at a distance from the centre; nil in the plots/courtyard or between rings.
+function Logic.areaAtRadius(r: number): (Area?, string?)
+	for _, area in Config.Areas do
+		if r >= area.inner.radius[1] and r < area.inner.radius[2] then
+			return area, "inner"
+		elseif r >= area.outer.radius[1] and r < area.outer.radius[2] then
+			return area, "outer"
+		end
+	end
+	return nil, nil
+end
+
+function Logic.areaAt(pos: Vector3): (Area?, string?)
+	local c = Config.Map.riftCenter
+	local dx, dz = pos.X - c.X, pos.Z - c.Z
+	return Logic.areaAtRadius(math.sqrt(dx * dx + dz * dz))
+end
+
+---------------------------------------------------------------------------
+-- Daily key, quests, index
+---------------------------------------------------------------------------
+
+function Logic.dayNumber(t: number): number
+	return math.floor(t / Config.Daily.keyEvery)
+end
+
+-- 3 distinct quest ids for (day, userId). Deterministic on every machine: a small integer LCG
+-- (MINSTD), not Random, so it never depends on the engine's generator.
+function Logic.questsForDay(day: number, userId: number): { string }
+	local list = Config.Quests.list
+	local state = ((math.floor(day) % 100000) * 7919 + (math.floor(math.abs(userId)) % 1000003) * 104729) % 2147483647
+	if state == 0 then
+		state = 1
+	end
+	local function nextInt(n: number): number
+		state = (state * 48271) % 2147483647
+		return state % n + 1
+	end
+	local order = table.create(#list, 0)
+	for i = 1, #list do
+		order[i] = i
+	end
+	local picks = {}
+	local count = math.min(Config.Quests.perDay, #list)
+	for i = 1, count do -- partial Fisher-Yates
+		local j = i + nextInt(#list - i + 1) - 1
+		order[i], order[j] = order[j], order[i]
+		table.insert(picks, list[order[i]].id)
+	end
+	return picks
+end
+
+function Logic.questReward(slot: number, bestKind: string): { coins: number, key: string? }
+	local row = Config.Quests.rewards[slot]
+	if not row then
+		return { coins = 0 }
+	end
+	local kind = Config.KeyKinds[bestKind] or Config.KeyKinds.Ash
+	return { coins = (row.coins or 0) * kind.coinMult, key = row.key }
+end
+
+-- Index rewards earned and not yet claimed: an area's monsters (3 + boss) -> a Rare key of that
+-- kind; a rarity row (every kind's every gear type) -> coins; everything -> the title.
+function Logic.indexRewards(index: Types.IndexData): { Types.IndexReward }
+	local out = {}
+	local all = true
+	for _, area in Config.Areas do
+		local kind = Config.KeyKinds[area.kind]
+		local done = index.monsters[kind.boss] == true
+		for _, id in kind.monsters do
+			if not index.monsters[id] then
+				done = false
+			end
+		end
+		all = all and done
+		local id = `Area:{area.id}`
+		if done and not index.claimed[id] then
+			local reward: Types.IndexReward = { id = id, kind = "area", area = area.id, key = Config.Index.areaKey }
+			table.insert(out, reward)
+		end
+	end
+	for _, rarity in Config.Rarities do
+		local done = true
+		for _, kindId in Config.KindOrder do
+			for _, typeId in Config.KindGear[kindId] do
+				if not index.gear[`{kindId}|{typeId}|{rarity.id}`] then
+					done = false
+				end
+			end
+		end
+		all = all and done
+		local id = `Row:{rarity.id}`
+		if done and not index.claimed[id] then
+			local coins = Config.Index.rowCoins[rarity.id] or 0
+			local reward: Types.IndexReward = { id = id, kind = "row", rarity = rarity.id, coins = coins }
+			table.insert(out, reward)
+		end
+	end
+	if all and not index.claimed.All then
+		local reward: Types.IndexReward = { id = "All", kind = "all", title = Config.Index.title }
+		table.insert(out, reward)
+	end
+	return out
+end
 return Logic
