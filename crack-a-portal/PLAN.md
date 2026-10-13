@@ -346,6 +346,19 @@ Shared server helpers (`Server/Lib`, not booted):
 | Tutorial | `isActive(player): boolean`, `onRemote(player, action, step)`, `grantUpgradeCoins(player)` (exactly one upgrade), first-wave and first-chest rules read by Openings |
 | DebugTools | Studio only (`RunService:IsStudio()`), BindableFunction `ServerStorage.DebugCall` and the `Debug` remote: coins, portal, unlock, gear, key, boss, rift, reset, tutorial, heal, killwave, chest, fall, state, home, monsters |
 
+**Extra hooks (added after the first draft; binding):**
+- `PlayerData.onReady(fn: (player) -> ())`: runs after the client's `Ready` (and after the full Profile snapshot) so systems can send their own state (Openings state, Rift state, Boards, Boss bar).
+- `PlayerData.addItem` fires `Bus.fire("ItemGained", player, item)`; `PlayerData.addKey` fires `KeyGained`. Nobody else fires those two.
+- `PlayerData.markDirty(player)`: schedule a snapshot after changing `session.profile` directly (prefer the API functions, which call it).
+- `Monsters.setPlayerDamage(fn: (player, amount, src) -> ())`: Combat injects `Combat.damagePlayer` in its `init` (Monsters must not require Combat).
+- `Monsters.onDamage(fn: (mon, amount, by: Player?) -> ())` and `Monsters.onDeath(fn: (mon, killer: Player?) -> ())`: listeners (Openings, MapMonsters, Rift).
+- `Monsters.blocks(mon, fromPos: Vector3): boolean`: true when a shield monster (shieldArc > 0) blocks a hit from that side.
+- `Monsters.send(mon)`: who sees a monster's warnings: the owner (opening), players within 70 studs (map), Rift participants (rift). Attacks uses it.
+- `Purchases.debugReceipt(player, productKey, receiptId): string`: runs the real receipt path (DebugTools `buy:` command).
+- `Openings.onPlayerDown(player): boolean` is registered with `Combat.onDown`; `Rift` registers its own; the default handler (map) sends the player home and heals.
+- **Require graph (no cycles):** Shared modules require only Shared modules. Systems may require: RateLimit, Save, PlayerData, Notify, Plots, Gates, Appearance, Monsters (requires Plots, PlayerData, Notify, Lib), Combat (requires Monsters, PlayerData, Notify, Plots), Openings (requires Combat, Monsters, Plots, PlayerData, Notify, Tutorial), MapMonsters, Economy (requires Openings), Daily, Index (requires Appearance), Leaderboards, Rift (requires Openings, Monsters, Combat), Purchases, Tutorial (**must not require Openings, Economy or Rift**), DebugTools (anything). A system lower in this list never requires one that requires it back.
+- Who updates `profile.stats`: Openings (openings, highestWave on WaveStarted, biggestPot on close, monstersBeaten for wave monsters, bossesBeaten), MapMonsters and Rift (monstersBeaten). Leaderboards only reads stats and writes the OrderedDataStores.
+
 `SpawnOpts = { mode: "opening" | "map" | "rift", owner: Player?, plot: Model?, hpMult: number, dmgMult: number, coinMult: number?, home: CFrame?, emerge: boolean?, scale: number?, glow: boolean?, boss: boolean?, band: string?, area: string? }`
 
 `Mon = { id: number, def: MonsterDef, model: Model, root: BasePart, hp: number, maxHp: number, dmg: number, mode: string, owner: Player?, plot: Model?, alive: boolean, state: string, target: Player?, home: CFrame?, nextAttack: number, attackIndex: number, busyUntil: number, data: { [string]: any } }`
