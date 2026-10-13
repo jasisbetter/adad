@@ -1,0 +1,7 @@
+std = "roblox_offline"
+exclude = ["tools/*"]
+
+[lints]
+global_usage = "deny"
+unused_variable = "warn"
+shadowing = "warn"

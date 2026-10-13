@@ -1,0 +1,31 @@
+{
+  "name": "CrackAPortal",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/ReplicatedStorage/Shared"
+      }
+    },
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/ServerScriptService/Server"
+      }
+    },
+    "ServerStorage": {
+      "$path": "src/ServerStorage"
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/StarterPlayerScripts/Client"
+        }
+      }
+    },
+    "Workspace": {
+      "$properties": {
+        "StreamingEnabled": true
+      }
+    }
+  }
+}

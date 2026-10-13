@@ -1,0 +1,110 @@
+---
+base: luau
+name: roblox_offline
+globals:
+  game:
+    any: true
+  workspace:
+    any: true
+  script:
+    any: true
+  plugin:
+    any: true
+  shared:
+    any: true
+  Instance:
+    any: true
+  Vector3:
+    any: true
+  Vector2:
+    any: true
+  Vector3int16:
+    any: true
+  Vector2int16:
+    any: true
+  CFrame:
+    any: true
+  Color3:
+    any: true
+  UDim:
+    any: true
+  UDim2:
+    any: true
+  Enum:
+    any: true
+  Random:
+    any: true
+  TweenInfo:
+    any: true
+  NumberRange:
+    any: true
+  NumberSequence:
+    any: true
+  NumberSequenceKeypoint:
+    any: true
+  ColorSequence:
+    any: true
+  ColorSequenceKeypoint:
+    any: true
+  Ray:
+    any: true
+  RaycastParams:
+    any: true
+  OverlapParams:
+    any: true
+  Rect:
+    any: true
+  PhysicalProperties:
+    any: true
+  Font:
+    any: true
+  BrickColor:
+    any: true
+  Region3:
+    any: true
+  Region3int16:
+    any: true
+  DateTime:
+    any: true
+  task:
+    any: true
+  tick:
+    any: true
+  time:
+    any: true
+  warn:
+    any: true
+  settings:
+    any: true
+  UserSettings:
+    any: true
+  elapsedtime:
+    any: true
+  Axes:
+    any: true
+  Faces:
+    any: true
+  PathWaypoint:
+    any: true
+  Content:
+    any: true
+  SharedTable:
+    any: true
+  CatalogSearchParams:
+    any: true
+  DockWidgetPluginGuiInfo:
+    any: true
+  FloatCurveKey:
+    any: true
+  RotationCurveKey:
+    any: true
+  Path2DControlPoint:
+    any: true
+  SecurityCapabilities:
+    any: true
+  ValueCurveKey:
+    any: true
+  typeof:
+    any: true
+  gcinfo:
+    any: true
